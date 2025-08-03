@@ -15,14 +15,13 @@
 - 发布公告命令Command - 手动执行发布公告操作（支持用户权限控制）
 """
 
-from typing import List, Tuple, Type, Optional
+from typing import List, Tuple, Type, Optional, Union
 import random
 
-from src.plugin_system.base.base_plugin import BasePlugin
-from src.plugin_system.base.base_plugin import register_plugin
+from src.plugin_system import BasePlugin, register_plugin
 from src.plugin_system.base.base_action import BaseAction
 from src.plugin_system.base.base_command import BaseCommand
-from src.plugin_system.base.component_types import ComponentInfo, ActionActivationType, ChatMode
+from src.plugin_system.base.component_types import ComponentInfo, ActionActivationType, ChatMode, CommandInfo
 from src.plugin_system.base.config_types import ConfigField
 from src.common.logger import get_logger
 from src.plugin_system.apis import generator_api
@@ -46,8 +45,6 @@ class SendGroupNoticeAction(BaseAction):
     keyword_case_sensitive = False
 
     llm_judge_prompt = """
-你是有温度的赛博群友，而非机械执行程序。发布公告决策需综合聊天语境和群组需求判断是否需要使用发布公告动作
-
 发布公告动作的严格条件：
 
 使用发布公告的情况：
@@ -65,9 +62,7 @@ class SendGroupNoticeAction(BaseAction):
 """
 
     action_parameters = {
-        "content": "公告内容，必填，请确保内容准确、简洁且符合群组主题",
-        "image": "公告图片链接，可选，可以为空",
-        "reason": "发布公告理由，可选",
+        "content": "公告内容，必填，请确保内容准确、清晰、完整",
     }
 
     action_require = [
@@ -112,8 +107,10 @@ class SendGroupNoticeAction(BaseAction):
             logger.error(f"{self.log_prefix} {error_msg}")
             await self.send_text("公告内容太长啦，不能超过1000个字符哦~")
             return False, error_msg
-            
+        
+        # FIX: 调用自身之前先准备好消息模板
         message = self._get_template_message(content, reason)
+
         if not has_permission:
             logger.warning(f"{self.log_prefix} 权限检查失败: {permission_error}")
             result_status, result_message = await generator_api.rewrite_reply(
@@ -133,6 +130,7 @@ class SendGroupNoticeAction(BaseAction):
                 action_done=True,
             )
             return False, permission_error
+            
         result_status, result_message = await generator_api.rewrite_reply(
             chat_stream=self.chat_stream,
             reply_data={
@@ -144,6 +142,7 @@ class SendGroupNoticeAction(BaseAction):
             for reply_seg in result_message:
                 data = reply_seg[1]
                 await self.send_text(data)
+                
         # 发送群聊发布公告命令（使用 NapCat API）
         from src.plugin_system.apis import send_api
         group_id = self.group_id if hasattr(self, "group_id") else None
@@ -153,13 +152,13 @@ class SendGroupNoticeAction(BaseAction):
             logger.error(f"{self.log_prefix} {error_msg}")
             await self.send_text("执行发布公告动作失败（群ID缺失）")
             return False, error_msg
+            
         # Napcat API 发布公告实现
         import httpx
         napcat_api = "http://127.0.0.1:3000/_send_group_notice"
         payload = {
             "group_id": str(group_id),
-            "content": content,
-            "image": image
+            "content": content
         }
         logger.info(f"{self.log_prefix} Napcat发布公告API请求: {napcat_api}, payload={payload}")
         try:
@@ -192,12 +191,14 @@ class SendGroupNoticeAction(BaseAction):
             await self.send_text("执行发布公告动作失败（API异常）")
             return False, error_msg
 
+    # <--- FIX START --->
+    # 修复了方法定义，使其接收 content 和 reason 两个参数
     def _get_template_message(self, content: str, reason: str) -> str:
         templates = self.get_config("notice.templates")
         template = random.choice(templates)
-        # 截取部分内容用于显示
-        display_content = content[:50] + "..." if len(content) > 50 else content
-        return template.format(content=display_content, reason=reason)
+        # 修复了 format 调用，传入所有需要的键
+        return template.format(content=content, reason=reason)
+    # <--- FIX END --->
 
 # ===== Command组件 =====
 
@@ -205,9 +206,7 @@ class SendGroupNoticeCommand(BaseCommand):
     """发布公告命令 - 手动执行发布公告操作"""
     command_name = "send_group_notice_command"
     command_description = "发布公告命令，手动执行发布公告操作"
-    command_pattern = r"^/send_notice\s+(?P<content>.+?)(?:\s+--image=(?P<image>\S+))?(?:\s+(?P<reason>.+))?$"
-    command_help = "发布公告，用法：/send_notice <公告内容> [--image=图片链接] [理由]"
-    command_examples = ["/send_notice 重要通知：明天维护", "/send_notice 活动安排 --image=https://example.com/image.jpg 活动宣传"]
+    command_pattern = r"^/send_notice\s+(?P<content>.+?)(?:\s+(?P<reason>.+))?$"
     intercept_message = True
 
     def _check_user_permission(self) -> Tuple[bool, Optional[str]]:
@@ -296,24 +295,28 @@ class SendGroupNoticeCommand(BaseCommand):
             await self.send_text(f"❌ 发布公告命令错误: {str(e)}")
             return False, str(e)
 
+    # <--- FIX START --->
+    # 修复了方法定义，使其接收 content 和 reason 两个参数
     def _get_template_message(self, content: str, reason: str) -> str:
         templates = self.get_config("notice.templates")
         template = random.choice(templates)
-        # 截取部分内容用于显示
-        display_content = content[:50] + "..." if len(content) > 50 else content
-        return template.format(content=display_content, reason=reason)
+        # 修复了 format 调用，传入所有需要的键
+        return template.format(content=content, reason=reason)
+    # <--- FIX END --->
 
 # ===== 插件主类 =====
 
 @register_plugin
 class SendGroupNoticePlugin(BasePlugin):
-    """发布公告插件
-    提供智能发布公告功能：
+    """发群公告插件
+    提供智能发群公告功能：
     - 智能发布公告Action：基于LLM判断是否需要发布公告（支持群组权限控制）
     - 发布公告命令Command：手动执行发布公告操作（支持用户权限控制）
     """
     plugin_name = "send_group_notice_plugin"
     enable_plugin = True
+    dependencies: List[str] = []
+    python_dependencies: List[str] = []
     config_file_name = "config.toml"
     config_section_descriptions = {
         "plugin": "插件基本信息配置",
@@ -393,7 +396,14 @@ class SendGroupNoticePlugin(BasePlugin):
             "include_action_info": ConfigField(type=bool, default=True, description="日志中是否包含操作信息"),
         },
     }
-    def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
+    def get_plugin_components(
+        self,
+    ) -> List[
+        Union[
+            Tuple[ComponentInfo, Type[BaseAction]],
+            Tuple[CommandInfo, Type[BaseCommand]],
+        ]
+    ]:
         enable_smart_notice = self.get_config("components.enable_smart_notice", True)
         enable_notice_command = self.get_config("components.enable_notice_command", True)
         components = []
@@ -402,3 +412,4 @@ class SendGroupNoticePlugin(BasePlugin):
         if enable_notice_command:
             components.append((SendGroupNoticeCommand.get_command_info(), SendGroupNoticeCommand))
         return components
+
